@@ -33,7 +33,8 @@ db.exec(
   `,
 );
 
-const machine_1_ideal_cycle_time = 5 / 3;
+const machine_1_ideal_cycle_time = 5 / 3; //1.66666... seconds
+const machine_1_ideal_ppm = machine_1_ideal_cycle_time * 60; // 100 ppm
 
 // db.prepare(
 //   `
@@ -41,23 +42,17 @@ const machine_1_ideal_cycle_time = 5 / 3;
 //   `,
 // ).run(machine_1_ideal_cycle_time); // 1.6666.. seconds
 
-for (let i = 0; i < 5; i++) {
-  const enter = Date.now();
-  await sleep(machine_1_ideal_cycle_time * 1000 * 2);
-  const exit = Date.now();
-  db.prepare(
-    `
-	INSERT INTO cycle_times (machine_id, enter, exit, difference) VALUES (?, ?, ?, ?);
-  `,
-  ).run(1, enter, exit, exit - enter);
-  // await sleep(5000);
-}
-
-// const result = db.prepare(
-//   `
-//   select * from cycle_times
+// for (let i = 0; i < 5; i++) {
+//   const enter = Date.now();
+//   await sleep(machine_1_ideal_cycle_time * 1000 * 1.3);
+//   const exit = Date.now();
+//   db.prepare(
+//     `
+// 	INSERT INTO cycle_times (machine_id, enter, exit, difference) VALUES (?, ?, ?, ?);
 //   `,
-// ).all() as TCycleTimes[];
+//   ).run(1, enter, exit, exit - enter);
+//   await sleep(200);
+// }
 
 const result = db.prepare(
   `
@@ -66,10 +61,10 @@ const result = db.prepare(
 ).all() as unknown as { difference: number; cycles: number }[];
 
 const average_cycle_time = result[0].difference / result[0].cycles;
+const cycle_efficiency = ((machine_1_ideal_cycle_time * 1000) /
+  average_cycle_time) * 100;
 console.log(
-  "Cycle efficiency:",
-  ((machine_1_ideal_cycle_time * 1000) /
-    average_cycle_time) * 100,
+  `Cycle efficiency: ${cycle_efficiency.toFixed(2)}%`,
 );
 
 const lag = db.prepare(
@@ -91,11 +86,63 @@ const lag = db.prepare(
 
 const average_gap_time = lag[0].sum / lag[0].count; // idle time
 
+const time_efficiency = ((machine_1_ideal_cycle_time * 1000) /
+  ((machine_1_ideal_cycle_time * 1000) + average_gap_time)) * 100;
 console.log(
   `Time Efficiency: ${
-    (((machine_1_ideal_cycle_time * 1000) /
-      ((machine_1_ideal_cycle_time * 1000) + average_gap_time)) * 100).toFixed(
-        2,
-      )
+    time_efficiency.toFixed(
+      2,
+    )
   }%`,
+);
+
+const real_ppm = (((cycle_efficiency / 100) * machine_1_ideal_cycle_time) *
+  (time_efficiency / 100)) * 60;
+
+console.log(
+  `Ideal ppm: ${machine_1_ideal_ppm.toFixed(2)}, Real ppm: ${
+    real_ppm.toFixed(2)
+  } (${((real_ppm / machine_1_ideal_ppm) * 100).toFixed(2)}%)`,
+);
+
+const first_cycle = db.prepare(
+  `
+  SELECT * 
+  FROM cycle_times 
+  WHERE machine_id = ?
+  ORDER BY exit ASC 
+  LIMIT 1
+`,
+).all(1) as unknown as TCycleTimes[];
+
+const last_cycle = db.prepare(
+  `
+  SELECT * 
+  FROM cycle_times 
+  WHERE machine_id = ? 
+  ORDER BY id DESC 
+  LIMIT 1;
+`,
+).all(1) as unknown as TCycleTimes[];
+
+const duration = last_cycle[0].exit - first_cycle[0].enter;
+
+const totalSeconds = Math.floor(duration / 1000);
+const hours = Math.floor(totalSeconds / 3600);
+const minutes = Math.floor((totalSeconds % 3600) / 60);
+const seconds = totalSeconds % 60;
+
+console.log(`Run duration: ${hours}h${minutes}m${seconds}s`);
+
+const wasted_time = (1 - (real_ppm / machine_1_ideal_ppm)) * duration;
+
+const totalSeconds2 = Math.floor(wasted_time / 1000);
+const hours2 = Math.floor(totalSeconds2 / 3600);
+const minutes2 = Math.floor((totalSeconds2 % 3600) / 60);
+const seconds2 = totalSeconds2 % 60;
+
+console.log(
+  `Wasted time: ${hours2}h${minutes2}m${seconds2}s (${
+    ((1 - (real_ppm / machine_1_ideal_ppm)) * 100).toFixed(2)
+  }%)`,
 );
