@@ -3,6 +3,10 @@
     "dev": "deno run --allow-read --allow-write --watch main.ts"
   },
   "imports": {
-    "@std/assert": "jsr:@std/assert@1"
+    "@std/assert": "jsr:@std/assert@1",
+    "effect": "npm:effect@^3.17.1"
+  },
+  "compilerOptions": {
+    "strict": true
   }
 }
