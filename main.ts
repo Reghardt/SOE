@@ -1,12 +1,18 @@
 import { Effect } from "effect";
 import { DatabaseSync } from "node:sqlite";
+import {
+  getCyclesSumAndCount,
+  getFirstCycle,
+  getGap,
+  getLastCycle,
+} from "./queries.ts";
 
 const new_run: boolean = true;
 const clear_old_runs: boolean = new_run;
 
 const db = new DatabaseSync("test.db");
 
-type TCycleTimes = {
+export type TCycleTimes = {
   id: number;
   machine_id: number;
   enter: number;
@@ -46,15 +52,20 @@ if (clear_old_runs) {
 
 const machines_ideal_cycle_time = [5 / 3, 5 / 3, 5 / 3, 5 / 3, 5 / 3];
 const machines_ideal_ppm = machines_ideal_cycle_time.map((time) => time * 60);
-const machines_parts_to_process = [5, 0, 0, 0, 0];
+const items_per_stage = [5, 0, 0, 0, 0, 0];
 
-const isPartsToProcessRemaining = () =>
+const isItemsToProcessRemaining = () =>
   Effect.gen(function* (_) {
     yield* Effect.yieldNow();
-    return machines_parts_to_process[0] + machines_parts_to_process[1];
+    let total = 0;
+    for (let i = 0; i < items_per_stage.length - 1; i++) {
+      total += items_per_stage[i];
+    }
+
+    return total;
   });
 
-const machine = (id: number, real_cycle_time: number) =>
+const machine = (id: number, real_cycle_time: number, isLast: boolean) =>
   Effect.gen(function* (_) {
     db.prepare(
       `
@@ -62,11 +73,17 @@ const machine = (id: number, real_cycle_time: number) =>
     `,
     ).run(id, machines_ideal_cycle_time[id]);
 
-    while (yield* isPartsToProcessRemaining()) {
-      if (machines_parts_to_process[id] > 0) {
+    while (yield* isItemsToProcessRemaining()) {
+      if (items_per_stage[id] > 0) {
         const enter = Date.now();
         yield* Effect.log(`Machine ${id} processing part`);
         yield* Effect.sleep(real_cycle_time * 1000);
+
+        while (items_per_stage[id + 1] > 0 && isLast == false) {
+          yield* Effect.yieldNow();
+        }
+        items_per_stage[id]--;
+        items_per_stage[id + 1]++;
 
         const exit = Date.now();
         db.prepare(
@@ -74,9 +91,6 @@ const machine = (id: number, real_cycle_time: number) =>
 	    INSERT INTO cycle_times (machine_id, enter, exit, difference) VALUES (?, ?, ?, ?);
         `,
         ).run(id, enter, exit, exit - enter);
-
-        machines_parts_to_process[id]--;
-        machines_parts_to_process[id + 1]++;
 
         yield* Effect.log(
           `Machine ${id} done processing part`,
@@ -90,8 +104,11 @@ const machine = (id: number, real_cycle_time: number) =>
 const main = () =>
   Effect.gen(function* (_) {
     yield* Effect.all([
-      machine(0, machines_ideal_cycle_time[0] * 1.5),
-      machine(1, machines_ideal_cycle_time[1]),
+      machine(0, machines_ideal_cycle_time[0], false),
+      machine(1, machines_ideal_cycle_time[1], false),
+      machine(2, machines_ideal_cycle_time[2] * 2, false),
+      machine(3, machines_ideal_cycle_time[3], false),
+      machine(4, machines_ideal_cycle_time[4], true),
     ], { concurrency: "unbounded" });
   });
 
@@ -100,37 +117,8 @@ if (new_run) {
   console.log("done");
 }
 
-function getCyclesSumAndCount(machine_id: number) {
-  return db.prepare(
-    `
-  select SUM(difference) as difference, COUNT(*) as cycles 
-  from cycle_times
-  where machine_id = ?;
-  `,
-  ).all(machine_id) as unknown as { difference: number; cycles: number }[];
-}
-
-function getGap(machine_id: number) {
-  return db.prepare(
-    `
-  WITH cycle_gap AS (
-    SELECT 
-        id,
-        machine_id,
-        enter - LAG(exit) OVER (ORDER BY id) as cycle_gap
-    FROM cycle_times 
-    WHERE machine_id = ?
-  )
-  SELECT SUM(cycle_gap) as sum, COUNT(*) as count
-  FROM cycle_gap 
-  WHERE cycle_gap IS NOT NULL
-  ORDER BY id;
-  `,
-  ).all(machine_id) as unknown as { sum: number; count: number }[];
-}
-
 function machineStats(id: number) {
-  const cycles_sum_count = getCyclesSumAndCount(id);
+  const cycles_sum_count = getCyclesSumAndCount(db, id);
   const average_cycle_time = cycles_sum_count[0].difference /
     cycles_sum_count[0].cycles;
   // cycle efficiency is ideal cycle time (converted to ms) divided by the actual average cycle time, * 100 to get %
@@ -138,10 +126,13 @@ function machineStats(id: number) {
     average_cycle_time) * 100;
 
   console.log(
+    `######################################################## Machine ${id}`,
+  );
+  console.log(
     `Cycle efficiency: ${cycle_efficiency.toFixed(2)}%`,
   );
 
-  const gap = getGap(id);
+  const gap = getGap(db, id);
 
   // the sum of all the gap times and the nr of lag times
   const average_gap_time = gap[0].sum / gap[0].count; // idle time
@@ -168,26 +159,10 @@ function machineStats(id: number) {
   );
 
   // gets the first cycle in the run
-  const first_cycle = db.prepare(
-    `
-  SELECT * 
-  FROM cycle_times 
-  WHERE machine_id = ?
-  ORDER BY exit ASC 
-  LIMIT 1
-`,
-  ).all(id) as unknown as TCycleTimes[];
+  const first_cycle = getFirstCycle(db, id);
 
   // gets the last cycle in the run
-  const last_cycle = db.prepare(
-    `
-  SELECT * 
-  FROM cycle_times 
-  WHERE machine_id = ? 
-  ORDER BY id DESC 
-  LIMIT 1;
-`,
-  ).all(id) as unknown as TCycleTimes[];
+  const last_cycle = getLastCycle(db, id);
 
   // gets duration of run
   const duration = last_cycle[0].exit - first_cycle[0].enter;
@@ -214,5 +189,6 @@ function machineStats(id: number) {
   );
 }
 
-machineStats(0);
-machineStats(1);
+for (let i = 0; i < machines_ideal_cycle_time.length; i++) {
+  machineStats(i);
+}
