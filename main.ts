@@ -8,7 +8,7 @@ import {
 } from "./queries.ts";
 
 const new_run: boolean = true;
-const clear_old_runs: boolean = new_run;
+const clear_old_runs: boolean = false;
 
 const db = new DatabaseSync("test.db");
 
@@ -112,12 +112,7 @@ const main = () =>
     ], { concurrency: "unbounded" });
   });
 
-if (new_run) {
-  await Effect.runPromise(main());
-  console.log("done");
-}
-
-function machineStats(id: number) {
+function machineStats(id: number, startTime: number) {
   const cycles_sum_count = getCyclesSumAndCount(db, id);
   const average_cycle_time = cycles_sum_count[0].difference /
     cycles_sum_count[0].cycles;
@@ -132,7 +127,7 @@ function machineStats(id: number) {
     `Cycle efficiency: ${cycle_efficiency.toFixed(2)}%`,
   );
 
-  const gap = getGap(db, id);
+  const gap = getGap(db, id, startTime);
 
   // the sum of all the gap times and the nr of lag times
   const average_gap_time = gap[0].sum / gap[0].count; // idle time
@@ -159,7 +154,7 @@ function machineStats(id: number) {
   );
 
   // gets the first cycle in the run
-  const first_cycle = getFirstCycle(db, id);
+  const first_cycle = getFirstCycle(db, id, startTime);
 
   // gets the last cycle in the run
   const last_cycle = getLastCycle(db, id);
@@ -189,6 +184,12 @@ function machineStats(id: number) {
   );
 }
 
-for (let i = 0; i < machines_ideal_cycle_time.length; i++) {
-  machineStats(i);
+if (new_run) {
+  const runStartTime = Date.now();
+  await Effect.runPromise(main());
+  console.log("done");
+
+  for (let i = 0; i < machines_ideal_cycle_time.length; i++) {
+    machineStats(i, runStartTime);
+  }
 }
