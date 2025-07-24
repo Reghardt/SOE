@@ -1,10 +1,12 @@
 {
   "tasks": {
-    "dev": "deno run --allow-read --allow-write --watch main.ts"
+    "dev": "deno run --allow-read --allow-write --allow-net --watch main.ts"
   },
   "imports": {
     "@std/assert": "jsr:@std/assert@1",
-    "effect": "npm:effect@^3.17.1"
+    "effect": "npm:effect@^3.17.1",
+    "mariadb": "npm:mariadb@^3.4.5",
+    "mysql2": "npm:mysql2@^3.14.2"
   },
   "compilerOptions": {
     "strict": true

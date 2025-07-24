@@ -1,5 +1,5 @@
 import { type DatabaseSync } from "node:sqlite";
-import { TCycleTimes } from "./main.ts";
+import { TCycleTimes } from "./main2.ts";
 
 export function getCyclesSumAndCount(db: DatabaseSync, machine_id: number) {
   return db.prepare(
