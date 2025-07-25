@@ -1,14 +1,21 @@
 import { type DatabaseSync } from "node:sqlite";
 import { TCycleTimes } from "./main.ts";
 
-export function getCyclesSumAndCount(db: DatabaseSync, machine_id: number) {
+export function getCyclesSumAndCount(
+  db: DatabaseSync,
+  machine_id: number,
+  startTime: number,
+) {
   return db.prepare(
     `
   select SUM(difference) as difference, COUNT(*) as cycles 
   from cycle_times
-  where machine_id = ?;
+  where machine_id = ? and exit >= ?;
   `,
-  ).all(machine_id) as unknown as { difference: number; cycles: number }[];
+  ).all(machine_id, startTime) as unknown as {
+    difference: number;
+    cycles: number;
+  }[];
 }
 
 export function getGap(

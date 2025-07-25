@@ -113,7 +113,7 @@ const main = () =>
   });
 
 function machineStats(id: number, startTime: number) {
-  const cycles_sum_count = getCyclesSumAndCount(db, id);
+  const cycles_sum_count = getCyclesSumAndCount(db, id, startTime);
   const average_cycle_time = cycles_sum_count[0].difference /
     cycles_sum_count[0].cycles;
   // cycle efficiency is ideal cycle time (converted to ms) divided by the actual average cycle time, * 100 to get %
