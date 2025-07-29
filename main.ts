@@ -1,195 +1,142 @@
-import { Effect } from "effect";
-import { DatabaseSync } from "node:sqlite";
 import {
-  getCyclesSumAndCount,
-  getFirstCycle,
-  getGap,
-  getLastCycle,
-} from "./queries.ts";
+  AttributeIds,
+  ClientMonitoredItem,
+  ClientSubscription,
+  DataValue,
+  MessageSecurityMode,
+  MonitoringParametersOptions,
+  OPCUAClient,
+  ReadValueIdOptions,
+  SecurityPolicy,
+  TimestampsToReturn,
+} from "node-opcua";
+import { DatabaseSync } from "node:sqlite";
 
-const new_run: boolean = true;
-const clear_old_runs: boolean = false;
+const client = OPCUAClient.create({
+  applicationName: "MyClient",
+  connectionStrategy: {
+    initialDelay: 1000,
+    maxRetry: 5,
+  },
+  securityMode: MessageSecurityMode.None,
+  securityPolicy: SecurityPolicy.None,
+  endpointMustExist: false,
+});
 
-const db = new DatabaseSync("test.db");
+await client.connect("opc.tcp://debian:4840");
 
-export type TCycleTimes = {
-  id: number;
-  machine_id: number;
-  enter: number;
-  exit: number;
-  difference: number;
+console.log("connected!");
+
+const session = await client.createSession();
+console.log("session created!");
+
+const subscription = ClientSubscription.create(session, {
+  requestedPublishingInterval: 1000,
+  requestedLifetimeCount: 100,
+  requestedMaxKeepAliveCount: 10,
+  maxNotificationsPerPublish: 100,
+  publishingEnabled: true,
+  priority: 10,
+});
+
+subscription
+  .on("started", function () {
+    console.log(
+      "subscription started for 2 seconds - subscriptionId=",
+      subscription.subscriptionId,
+    );
+  })
+  .on("keepalive", function () {
+    console.log("keepalive");
+  })
+  .on("terminated", function () {
+    console.log("terminated");
+  });
+
+// install monitored item
+
+const itemToMonitor: ReadValueIdOptions = {
+  nodeId:
+    "ns=4;s=|var|CODESYS Control for Linux SL.Application.PLC_PRG.machine_0_enter",
+  attributeId: AttributeIds.Value,
+};
+const parameters: MonitoringParametersOptions = {
+  samplingInterval: 100,
+  discardOldest: true,
+  queueSize: 10,
 };
 
-db.exec(
-  `
-	CREATE TABLE IF NOT EXISTS machines (
-	  id INTEGER UNIQUE,
-	  ideal_cycle_time REAL
-	) STRICT;
-  `,
+const monitoredItem = ClientMonitoredItem.create(
+  subscription,
+  itemToMonitor,
+  parameters,
+  TimestampsToReturn.Both,
 );
+
+const db = new DatabaseSync(":memory:");
 
 db.exec(
   `
-	CREATE TABLE IF NOT EXISTS cycle_times (
+	CREATE TABLE IF NOT EXISTS times (
 	  id INTEGER PRIMARY KEY AUTOINCREMENT,
-	  machine_id INTEGER,
-    enter REAL,
-    exit REAL,
-    difference REAL,
-    FOREIGN KEY(machine_id) REFERENCES machines(id)
+    time REAL
 	) STRICT;
   `,
 );
 
-if (clear_old_runs) {
-  db.prepare(
-    `
-    DELETE FROM cycle_times;
-    `,
-  ).run();
-}
-
-const machines_ideal_cycle_time = [5 / 3, 5 / 3, 5 / 3, 5 / 3, 5 / 3];
-const machines_ideal_ppm = machines_ideal_cycle_time.map((time) => time * 60);
-const items_per_stage = [5, 0, 0, 0, 0, 0];
-
-const isItemsToProcessRemaining = () =>
-  Effect.gen(function* (_) {
-    yield* Effect.yieldNow();
-    let total = 0;
-    for (let i = 0; i < items_per_stage.length - 1; i++) {
-      total += items_per_stage[i];
-    }
-
-    return total;
-  });
-
-const machine = (id: number, real_cycle_time: number, isLast: boolean) =>
-  Effect.gen(function* (_) {
+monitoredItem.on("changed", (dataValue: DataValue) => {
+  if (dataValue.value.value === true && dataValue.serverTimestamp) {
     db.prepare(
       `
-	    INSERT OR IGNORE INTO machines (id, ideal_cycle_time) VALUES (?, ?);
+      INSERT INTO times(time) VALUES(?)
     `,
-    ).run(id, machines_ideal_cycle_time[id]);
-
-    while (yield* isItemsToProcessRemaining()) {
-      if (items_per_stage[id] > 0) {
-        const enter = Date.now();
-        yield* Effect.log(`Machine ${id} processing part`);
-        yield* Effect.sleep(real_cycle_time * 1000);
-
-        while (items_per_stage[id + 1] > 0 && isLast == false) {
-          yield* Effect.yieldNow();
-        }
-        items_per_stage[id]--;
-        items_per_stage[id + 1]++;
-
-        const exit = Date.now();
-        db.prepare(
-          `
-	    INSERT INTO cycle_times (machine_id, enter, exit, difference) VALUES (?, ?, ?, ?);
-        `,
-        ).run(id, enter, exit, exit - enter);
-
-        yield* Effect.log(
-          `Machine ${id} done processing part`,
-        );
-      } else {
-        yield* Effect.yieldNow();
-      }
-    }
-  });
-
-const main = () =>
-  Effect.gen(function* (_) {
-    yield* Effect.all([
-      machine(0, machines_ideal_cycle_time[0], false),
-      machine(1, machines_ideal_cycle_time[1], false),
-      machine(2, machines_ideal_cycle_time[2] * 2, false),
-      machine(3, machines_ideal_cycle_time[3], false),
-      machine(4, machines_ideal_cycle_time[4], true),
-    ], { concurrency: "unbounded" });
-  });
-
-function machineStats(id: number, startTime: number) {
-  const cycles_sum_count = getCyclesSumAndCount(db, id, startTime);
-  const average_cycle_time = cycles_sum_count[0].difference /
-    cycles_sum_count[0].cycles;
-  // cycle efficiency is ideal cycle time (converted to ms) divided by the actual average cycle time, * 100 to get %
-  const cycle_efficiency = ((machines_ideal_cycle_time[0] * 1000) /
-    average_cycle_time) * 100;
-
-  console.log(
-    `######################################################## Machine ${id}`,
-  );
-  console.log(
-    `Cycle efficiency: ${cycle_efficiency.toFixed(2)}%`,
-  );
-
-  const gap = getGap(db, id, startTime);
-
-  // the sum of all the gap times and the nr of lag times
-  const average_gap_time = gap[0].sum / gap[0].count; // idle time
-
-  // time efficiency = ideal cycle time / (ideal cycle time + average gap time), then convert to %
-  const time_efficiency = ((machines_ideal_cycle_time[0] * 1000) /
-    ((machines_ideal_cycle_time[0] * 1000) + average_gap_time)) * 100;
-
-  console.log(
-    `Time Efficiency: ${
-      time_efficiency.toFixed(
-        2,
-      )
-    }%`,
-  );
-
-  const real_ppm = (((cycle_efficiency / 100) * machines_ideal_cycle_time[0]) *
-    (time_efficiency / 100)) * 60;
-
-  console.log(
-    `Ideal ppm: ${machines_ideal_ppm[id].toFixed(2)}, Real ppm: ${
-      real_ppm.toFixed(2)
-    } (${((real_ppm / machines_ideal_ppm[id]) * 100).toFixed(2)}%)`,
-  );
-
-  // gets the first cycle in the run
-  const first_cycle = getFirstCycle(db, id, startTime);
-
-  // gets the last cycle in the run
-  const last_cycle = getLastCycle(db, id);
-
-  // gets duration of run
-  const duration = last_cycle[0].exit - first_cycle[0].enter;
-
-  // duration (UTC ms) to human readable
-  const totalSeconds = Math.floor(duration / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  console.log(`Run duration: ${hours}h${minutes}m${seconds}s`);
-
-  // calculate then print wasted time
-  const wasted_time = (1 - (real_ppm / machines_ideal_ppm[id])) * duration;
-
-  // wasted time to human readable
-  const totalSeconds2 = Math.floor(wasted_time / 1000);
-  const hours2 = Math.floor(totalSeconds2 / 3600);
-  const minutes2 = Math.floor((totalSeconds2 % 3600) / 60);
-  const seconds2 = totalSeconds2 % 60;
-  console.log(
-    `Wasted time: ${hours2}h${minutes2}m${seconds2}s (${
-      ((1 - (real_ppm / machines_ideal_ppm[id])) * 100).toFixed(2) // calculates %
-    }%)`,
-  );
-}
-
-if (new_run) {
-  const runStartTime = Date.now();
-  await Effect.runPromise(main());
-  console.log("done");
-
-  for (let i = 0; i < machines_ideal_cycle_time.length; i++) {
-    machineStats(i, runStartTime);
+    ).run(dataValue.serverTimestamp.getTime());
+    db.prepare(
+      `
+      DELETE FROM times where time <= ?
+      `,
+    ).run(dataValue.serverTimestamp.getTime() - 60000);
   }
-}
+});
+
+setInterval(() => {
+  const first = db.prepare(
+    `
+  SELECT * 
+  FROM times 
+  ORDER BY time ASC 
+  LIMIT 1
+`,
+  ).all() as { id: number; time: number }[];
+
+  const last = db.prepare(
+    `
+  SELECT * 
+  FROM times 
+  ORDER BY time DESC 
+  LIMIT 1
+`,
+  ).all() as { id: number; time: number }[];
+
+  // console.log(first[0]);
+  if (first[0] !== undefined && last[0] !== undefined) {
+    const periode = last[0].time - first[0].time;
+
+    const res = db.prepare(
+      `
+    SELECT COUNT(*) as count
+    FROM times
+  `,
+    ).all() as { count: number }[];
+
+    console.log(res);
+    if (res[0] !== undefined) {
+      console.log((res[0].count / (periode / 1000)) * 60);
+    }
+  }
+}, 1000);
+
+// await sleep(10000);
+
+// console.log("now terminating subscription");
+// await subscription.terminate();
