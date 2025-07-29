@@ -11,6 +11,7 @@ import {
   TimestampsToReturn,
 } from "node-opcua";
 import { DatabaseSync } from "node:sqlite";
+import { scale } from "effect/BigDecimal";
 
 const client = OPCUAClient.create({
   applicationName: "MyClient",
@@ -31,7 +32,7 @@ const session = await client.createSession();
 console.log("session created!");
 
 const subscription = ClientSubscription.create(session, {
-  requestedPublishingInterval: 1000,
+  requestedPublishingInterval: 100,
   requestedLifetimeCount: 100,
   requestedMaxKeepAliveCount: 10,
   maxNotificationsPerPublish: 100,
@@ -61,7 +62,7 @@ const itemToMonitor: ReadValueIdOptions = {
   attributeId: AttributeIds.Value,
 };
 const parameters: MonitoringParametersOptions = {
-  samplingInterval: 100,
+  samplingInterval: 2,
   discardOldest: true,
   queueSize: 10,
 };
@@ -73,70 +74,26 @@ const monitoredItem = ClientMonitoredItem.create(
   TimestampsToReturn.Both,
 );
 
-const db = new DatabaseSync(":memory:");
-
-db.exec(
-  `
-	CREATE TABLE IF NOT EXISTS times (
-	  id INTEGER PRIMARY KEY AUTOINCREMENT,
-    time REAL
-	) STRICT;
-  `,
-);
+const data: number[] = [];
 
 monitoredItem.on("changed", (dataValue: DataValue) => {
   if (dataValue.value.value === true && dataValue.serverTimestamp) {
-    db.prepare(
-      `
-      INSERT INTO times(time) VALUES(?)
-    `,
-    ).run(dataValue.serverTimestamp.getTime());
-    db.prepare(
-      `
-      DELETE FROM times where time <= ?
-      `,
-    ).run(dataValue.serverTimestamp.getTime() - 60000);
-  }
-});
+    while (
+      data.length > 0 && data[0] < dataValue.serverTimestamp.getTime() - 60_000
+    ) {
+      data.shift();
+    }
 
-setInterval(() => {
-  const first = db.prepare(
-    `
-  SELECT * 
-  FROM times 
-  ORDER BY time ASC 
-  LIMIT 1
-`,
-  ).all() as { id: number; time: number }[];
+    data.push(dataValue.serverTimestamp.getTime());
 
-  const last = db.prepare(
-    `
-  SELECT * 
-  FROM times 
-  ORDER BY time DESC 
-  LIMIT 1
-`,
-  ).all() as { id: number; time: number }[];
-
-  // console.log(first[0]);
-  if (first[0] !== undefined && last[0] !== undefined) {
-    const periode = last[0].time - first[0].time;
-
-    const res = db.prepare(
-      `
-    SELECT COUNT(*) as count
-    FROM times
-  `,
-    ).all() as { count: number }[];
-
-    console.log(res);
-    if (res[0] !== undefined) {
-      console.log((res[0].count / (periode / 1000)) * 60);
+    if (data.length > 1) {
+      const start = data[0];
+      const end = data.at(-1);
+      if (end !== undefined) {
+        const duration = end - start;
+        const durationInSeconds = duration / 1000;
+        console.log((data.length - 1) / (duration / 1000) * 60);
+      }
     }
   }
-}, 1000);
-
-// await sleep(10000);
-
-// console.log("now terminating subscription");
-// await subscription.terminate();
+});
